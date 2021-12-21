@@ -5614,11 +5614,6 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode,
                     }
                 }
                 break;
-            case QS_ROWS_PORTRAIT:
-            case QS_ROWS_LANDSCAPE:
-            case QS_COLUMNS:
-                updateResources();
-                break;
             default:
                 break;
         }

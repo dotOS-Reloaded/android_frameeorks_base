@@ -718,7 +718,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     boolean mForcingShowNavBar;
     int mForcingShowNavBarLayer;
 
-    boolean mDevForceNavbar = false;
+    int mDevForceNavbar = -1;
 
     // States of keyguard dismiss.
     private static final int DISMISS_KEYGUARD_NONE = 0; // Keyguard not being dismissed.
@@ -1576,7 +1576,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             mPowerKeyHandled = true;
             mHandler.removeMessages(MSG_POWER_LONG_PRESS);
             // See if we deferred screen wake because long press power for torch is enabled
-            if (mResolvedLongPressOnPowerBehavior == LONG_PRESS_POWER_TORCH && !isScreenOn()) {
+            if (mResolvedLongPressOnPowerBehavior == LONG_PRESS_POWER_TORCH &&
+                    (!isScreenOn() || isDozeMode())) {
                 wakeUpFromPowerKey(SystemClock.uptimeMillis());
             }
         }
@@ -1774,11 +1775,24 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         }
     }
 
+    private boolean isDozeMode() {
+        IDreamManager dreamManager = getDreamManager();
+
+        try {
+            if (dreamManager != null && dreamManager.isDreaming()) {
+                return true;
+            }
+        } catch (RemoteException e) {
+            Slog.e(TAG, "RemoteException when checking if dreaming", e);
+        }
+        return false;
+    }
+
     private int getResolvedLongPressOnPowerBehavior() {
         if (FactoryTest.isLongPressOnPowerOffEnabled()) {
             return LONG_PRESS_POWER_SHUT_OFF_NO_CONFIRM;
         }
-        if (mTorchLongPressPowerEnabled && !isScreenOn()) {
+        if (mTorchLongPressPowerEnabled && (!isScreenOn() || isDozeMode())) {
             return LONG_PRESS_POWER_TORCH;
         }
         if (mPocketLockShowing) {
@@ -2396,7 +2410,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     private void updateKeyAssignments() {
         int activeHardwareKeys = mDeviceHardwareKeys;
 
-        if (mDevForceNavbar) {
+        if (mDevForceNavbar == 1) {
             activeHardwareKeys = 0;
         }
         final boolean hasMenu = (activeHardwareKeys & KEY_MASK_MENU) != 0;
@@ -2665,12 +2679,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 updateWakeGestureListenerLp();
             }
 
-            boolean devForceNavbar = CMSettings.Global.getIntForUser(resolver,
-                    CMSettings.Global.DEV_FORCE_SHOW_NAVBAR, 0, UserHandle.USER_CURRENT) == 1;
+            int devForceNavbar = CMSettings.Global.getIntForUser(resolver,
+                    CMSettings.Global.DEV_FORCE_SHOW_NAVBAR, 0, UserHandle.USER_CURRENT);
             if (devForceNavbar != mDevForceNavbar) {
                 mDevForceNavbar = devForceNavbar;
                 if (mCMHardware.isSupported(CMHardwareManager.FEATURE_KEY_DISABLE)) {
-                    mCMHardware.set(CMHardwareManager.FEATURE_KEY_DISABLE, mDevForceNavbar);
+                    mCMHardware.set(CMHardwareManager.FEATURE_KEY_DISABLE, mDevForceNavbar == 1);
                 }
             }
 
@@ -3005,6 +3019,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     attrs.hideTimeoutMilliseconds = TOAST_WINDOW_TIMEOUT;
                 }
                 attrs.windowAnimations = com.android.internal.R.style.Animation_Toast;
+                // Toasts can't be clickable
+                attrs.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
                 break;
         }
 
@@ -6537,8 +6553,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         @Override public void run() {
             synchronized (mScreenshotLock) {
                 if (mScreenshotConnection != null) {
-                    mContext.unbindService(mScreenshotConnection);
-                    mScreenshotConnection = null;
+                    resetScreenshotConnection();
                     notifyScreenshotError();
                 }
             }
@@ -6570,8 +6585,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                             public void handleMessage(Message msg) {
                                 synchronized (mScreenshotLock) {
                                     if (mScreenshotConnection == myConn) {
-                                        mContext.unbindService(mScreenshotConnection);
-                                        mScreenshotConnection = null;
+                                        resetScreenshotConnection();
                                         mHandler.removeCallbacks(mScreenshotTimeout);
                                     }
                                 }
@@ -6594,8 +6608,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 public void onServiceDisconnected(ComponentName name) {
                     synchronized (mScreenshotLock) {
                         if (mScreenshotConnection != null) {
-                            mContext.unbindService(mScreenshotConnection);
-                            mScreenshotConnection = null;
+                            resetScreenshotConnection();
                             mHandler.removeCallbacks(mScreenshotTimeout);
                             notifyScreenshotError();
                         }
@@ -6652,6 +6665,16 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             default:
                 Log.w(TAG, "getVolumeWakeTriggered: unexpected keyCode=" + keyCode);
                 return false;
+        }
+    }
+
+    /**
+     * Reset the screenshot connection.
+     */
+    private void resetScreenshotConnection() {
+        if (mScreenshotConnection != null) {
+            mContext.unbindService(mScreenshotConnection);
+            mScreenshotConnection = null;
         }
     }
 
@@ -7334,6 +7357,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             return false;
         }
 
+        final boolean isDozing = isDozeMode();
+
+        if (event != null && isVolumeKey(event) && isDozing) {
+            return false;
+        }
+
         // Send events to keyguard while the screen is on and it's showing.
         if (isKeyguardShowingAndNotOccluded() && !displayOff) {
             return true;
@@ -7349,19 +7378,18 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
         // Send events to a dozing dream even if the screen is off since the dream
         // is in control of the state of the screen.
-        IDreamManager dreamManager = getDreamManager();
-
-        try {
-            if (dreamManager != null && dreamManager.isDreaming() && !dreamManager.isDozing()) {
-                return true;
-            }
-        } catch (RemoteException e) {
-            Slog.e(TAG, "RemoteException when checking if dreaming", e);
+        if (isDozing) {
+            return true;
         }
 
         // Otherwise, consume events since the user can't see what is being
         // interacted with.
         return false;
+    }
+
+    private boolean isVolumeKey(KeyEvent event) {
+        return event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_DOWN
+                || event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_UP;
     }
 
     private void dispatchDirectAudioEvent(KeyEvent event) {
@@ -7524,6 +7552,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 synchronized (mWindowManagerFuncs.getWindowManagerLock()) {
                     mLastSystemUiFlags = 0;
                     updateSystemUiVisibilityLw();
+                }
+
+                // close the screenshot connection on user switch so that screenshots
+                // are always started with the correct user's context
+                synchronized(mScreenshotLock) {
+                  resetScreenshotConnection();
                 }
             }
         }
@@ -9202,7 +9236,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     // overridden by qemu.hw.mainkeys in the emulator.
     @Override
     public boolean hasNavigationBar() {
-        return mHasNavigationBar || mDevForceNavbar;
+        return mHasNavigationBar || mDevForceNavbar == 1;
     }
 
     public boolean needsNavigationBar() {
